@@ -1,81 +1,84 @@
 #include <pairs_lib/batch_visualizer.h>
 #include <pairs_lib/mutex.h>
 #include <pairs_lib/param_loader.h>
-#include <pairs_lib/subscribe_handler.h>
+#include <pairs_lib/subscriber_handler.h>
 #include <pairs_lib/transformer.h>
-#include <pairs_octomap_planner/Path.h>
-#include <pairs_octomap_tools/octomap_methods.h>
-#include <nodelet/nodelet.h>
+#include <pairs_lib/node.h>
 #include <octomap/OcTree.h>
-#include <octomap_msgs/Octomap.h>
-#include <ros/ros.h>
-#include <astar_planner.hpp>
+#include <octomap_msgs/msg/octomap.hpp>
+#include <octomap_msgs/conversions.h>
+#include <pairs_modules_msgs/srv/path.hpp>
+#include <pairs_octomap_planner/astar_planner.hpp>
 #include <iostream>
 #include <memory>
 
 namespace pairs_octomap_planner
 {
-  using OcTree_t          = octomap::OcTree;
+  using OcTree_t = octomap::OcTree;
   using OcTreeSharedPtr_t = std::shared_ptr<octomap::OcTree>;
 
-  class MinimalOctomapPlanner : public nodelet::Nodelet
+  class MinimalOctomapPlanner : public pairs_lib::Node
   {
   public:
-    virtual void onInit();
+    explicit MinimalOctomapPlanner(const rclcpp::NodeOptions& options);
 
   private:
-    ros::NodeHandle nh_;
+    rclcpp::Node::SharedPtr node_;
+    rclcpp::Clock::SharedPtr clock_;
 
-    bool        is_initialized_ = false;
-    std::string _uav_name_;
+    bool is_initialized_ = false;
 
     // params
-    double _safe_obstacle_distance_      = 0.0;
+    double _safe_obstacle_distance_ = 0.0;
     double _distance_transform_distance_ = 0.0;
-    double _planning_tree_resolution_    = 0.0;
-    double _distance_penalty_            = 0.0;
-    double _greedy_penalty_              = 0.0;
-    double _timeout_threshold_           = 0.0;
-    double _max_waypoint_distance_       = 0.0;
-    double _min_altitude_                = 0.0;
-    double _max_altitude_                = 0.0;
-    double _scale_points_                = 0.0;
-    double _scale_lines_                 = 0.0;
-    double _min_path_length_             = 0.0;
-    bool   _unknown_is_occupied_         = false;
+    double _planning_tree_resolution_ = 0.0;
+    double _distance_penalty_ = 0.0;
+    double _greedy_penalty_ = 0.0;
+    double _timeout_threshold_ = 0.0;
+    double _max_waypoint_distance_ = 0.0;
+    double _min_altitude_ = 0.0;
+    double _max_altitude_ = 0.0;
+    double _scale_points_ = 0.0;
+    double _scale_lines_ = 0.0;
+    double _min_path_length_ = 0.0;
+    bool _unknown_is_occupied_ = false;
 
-    std::mutex                                mutex_octree_;
-    std::shared_ptr<OcTree_t>                 octree_ = nullptr;
-    std::string                               octree_frame_;
+    std::mutex mutex_octree_;
+    std::shared_ptr<OcTree_t> octree_ = nullptr;
+    std::string octree_frame_;
     std::shared_ptr<pairs_lib::BatchVisualizer> bv_planner_;
 
-    pairs_lib::SubscribeHandler<octomap_msgs::Octomap> sh_octomap_;
+    pairs_lib::SubscriberHandler<octomap_msgs::msg::Octomap> sh_octomap_;
 
-    void timeoutOctomap(const std::string& topic,
-                        const ros::Time&   last_msg);
-    void callbackOctomap(const octomap_msgs::Octomap::ConstPtr msg);
+    void timeoutOctomap(const std::string& topic, const rclcpp::Time& last_msg);
+    void callbackOctomap(const octomap_msgs::msg::Octomap::ConstSharedPtr msg);
 
-    ros::ServiceServer service_server_get_path_;
+    rclcpp::Service<pairs_modules_msgs::srv::Path>::SharedPtr service_server_get_path_;
 
-    bool callbackGetPath(pairs_octomap_planner::Path::Request&  req,
-                         pairs_octomap_planner::Path::Response& res);
+    void callbackGetPath(const std::shared_ptr<pairs_modules_msgs::srv::Path::Request> req, std::shared_ptr<pairs_modules_msgs::srv::Path::Response> res);
 
     std::unique_ptr<pairs_lib::Transformer> transformer_;
 
-    std::optional<OcTreeSharedPtr_t> msgToMap(const octomap_msgs::OctomapConstPtr octomap);
+    std::optional<OcTreeSharedPtr_t> msgToMap(const octomap_msgs::msg::Octomap::ConstSharedPtr octomap);
   };
 
-  void MinimalOctomapPlanner::onInit()
+  MinimalOctomapPlanner::MinimalOctomapPlanner(const rclcpp::NodeOptions& options) : pairs_lib::Node("minimal_octomap_planner", options)
   {
-    nh_ = nodelet::Nodelet::getMTPrivateNodeHandle();
+    node_ = this_node_ptr();
+    clock_ = node_->get_clock();
 
-    ros::Time::waitForValid();
+    RCLCPP_INFO(node_->get_logger(), "initializing");
 
-    ROS_INFO("[PairsMinimalOctomapPlanner]: initializing");
+    pairs_lib::ParamLoader param_loader(node_, "PairsMinimalOctomapPlanner");
 
-    pairs_lib::ParamLoader param_loader(nh_, "PairsMinimalOctomapPlanner");
+    if (!param_loader.addYamlFileFromParam("config"))
+    {
+      RCLCPP_ERROR(node_->get_logger(), "Could not load the config file");
+      rclcpp::shutdown();
+      exit(1);
+    }
 
-    param_loader.loadParam("uav_name", _uav_name_);
+    param_loader.setPrefix("pairs_uav_planner/minimal_planner/");
 
     param_loader.loadParam("safe_obstacle_distance", _safe_obstacle_distance_);
     param_loader.loadParam("distance_penalty", _distance_penalty_);
@@ -92,162 +95,162 @@ namespace pairs_octomap_planner
     param_loader.loadParam("viz/scale/points", _scale_points_);
     param_loader.loadParam("viz/scale/lines", _scale_lines_);
 
-    if (!param_loader.loadedSuccessfully()) {
-      ROS_ERROR("[PairsMinimalOctomapPlanner]: Could not load all parameters");
-      ros::shutdown();
+    if (!param_loader.loadedSuccessfully())
+    {
+      RCLCPP_ERROR(node_->get_logger(), "Could not load all parameters");
+      rclcpp::shutdown();
+      exit(1);
     }
 
-    pairs_lib::SubscribeHandlerOptions shopts;
-    shopts.nh                 = nh_;
-    shopts.node_name          = "PairsMinimalOctomapPlanner";
+    auto callback_octomap = [this](const octomap_msgs::msg::Octomap::ConstSharedPtr msg) { this->callbackOctomap(msg); };
+
+    pairs_lib::SubscriberHandlerOptions shopts;
+    shopts.node = node_;
+    shopts.node_name = "PairsMinimalOctomapPlanner";
     shopts.no_message_timeout = pairs_lib::no_timeout;
-    shopts.threadsafe         = true;
-    shopts.autostart          = true;
-    shopts.queue_size         = 1;
-    shopts.transport_hints    = ros::TransportHints().tcpNoDelay();
+    shopts.threadsafe = true;
+    shopts.autostart = true;
 
-    sh_octomap_ = pairs_lib::SubscribeHandler<octomap_msgs::Octomap>(shopts,
-                                                                   "octomap_in",
-                                                                   ros::Duration(5.0),
-                                                                   &MinimalOctomapPlanner::timeoutOctomap,
-                                                                   this,
-                                                                   &MinimalOctomapPlanner::callbackOctomap,
-                                                                   this);
+    sh_octomap_ = pairs_lib::SubscriberHandler<octomap_msgs::msg::Octomap>(shopts, "~/octomap_in", callback_octomap);
 
-    service_server_get_path_ = nh_.advertiseService("get_path_in", &MinimalOctomapPlanner::callbackGetPath, this);
+    service_server_get_path_ = node_->create_service<pairs_modules_msgs::srv::Path>(
+        "get_path_in", std::bind(&MinimalOctomapPlanner::callbackGetPath, this, std::placeholders::_1, std::placeholders::_2));
 
-    transformer_ = std::make_unique<pairs_lib::Transformer>("PairsMinimalOctomapPlanner");
-    transformer_->setDefaultPrefix(_uav_name_);
+    transformer_ = std::make_unique<pairs_lib::Transformer>(node_);
+    transformer_->setLookupTimeout(std::chrono::duration<double>(0.5));
     transformer_->retryLookupNewest(true);
+    RCLCPP_INFO(node_->get_logger(), "Initialized transformer.");
 
-    bv_planner_ = std::make_shared<pairs_lib::BatchVisualizer>(nh_, "visualize_planner", "");
+    bv_planner_ = std::make_shared<pairs_lib::BatchVisualizer>(node_, "visualize_planner", "");
     bv_planner_->setPointsScale(_scale_points_);
     bv_planner_->setLinesScale(_scale_lines_);
 
     is_initialized_ = true;
 
-    ROS_INFO("[PairsMinimalOctomapPlanner]: initialized");
+    RCLCPP_INFO(node_->get_logger(), "initialized");
   }
 
-  void MinimalOctomapPlanner::callbackOctomap(const octomap_msgs::Octomap::ConstPtr msg)
+  void MinimalOctomapPlanner::callbackOctomap(const octomap_msgs::msg::Octomap::ConstSharedPtr msg)
   {
-    if (!is_initialized_) {
+    if (!is_initialized_)
+    {
       return;
     }
 
-    ROS_INFO_ONCE("[PairsMinimalOctomapPlanner]: getting octomap");
+    RCLCPP_INFO_ONCE(node_->get_logger(), "getting octomap");
 
     std::optional<OcTreeSharedPtr_t> octree_local = msgToMap(msg);
 
-    if (!octree_local) {
-      ROS_WARN_THROTTLE(1.0, "[PairsMinimalOctomapPlanner]: received map is empty!");
+    if (!octree_local)
+    {
+      RCLCPP_WARN_THROTTLE(node_->get_logger(), *clock_, 1000, "received map is empty!");
       return;
     }
-      pairs_lib::set_mutexed(mutex_octree_,octree_local.value(), octree_);
-      pairs_lib::set_mutexed(mutex_octree_,msg->header.frame_id, octree_frame_);
+    pairs_lib::set_mutexed(mutex_octree_, octree_local.value(), octree_);
+    pairs_lib::set_mutexed(mutex_octree_, msg->header.frame_id, octree_frame_);
   }
 
-  std::optional<OcTreeSharedPtr_t> MinimalOctomapPlanner::msgToMap(const octomap_msgs::OctomapConstPtr octomap)
+  std::optional<OcTreeSharedPtr_t> MinimalOctomapPlanner::msgToMap(const octomap_msgs::msg::Octomap::ConstSharedPtr octomap)
   {
     octomap::AbstractOcTree* abstract_tree;
 
-    if (octomap->binary) {
+    if (octomap->binary)
+    {
       abstract_tree = octomap_msgs::binaryMsgToMap(*octomap);
-    }
-    else {
+
+    } else
+    {
       abstract_tree = octomap_msgs::fullMsgToMap(*octomap);
     }
 
-    if (!abstract_tree) {
-      ROS_WARN("[PairsMinimalOctomapPlanner]: Octomap message is empty! can not convert to OcTree");
+    if (!abstract_tree)
+    {
+      RCLCPP_WARN(node_->get_logger(), "Octomap message is empty! can not convert to OcTree");
       return {};
-    }
-    else {
-      return { OcTreeSharedPtr_t(dynamic_cast<OcTree_t*>(abstract_tree)) };
+    } else
+    {
+      return {OcTreeSharedPtr_t(dynamic_cast<OcTree_t*>(abstract_tree))};
     }
   }
 
-  void MinimalOctomapPlanner::timeoutOctomap(const std::string& topic,
-                                             const ros::Time&   last_msg)
+  void MinimalOctomapPlanner::timeoutOctomap([[maybe_unused]] const std::string& topic, [[maybe_unused]] const rclcpp::Time& last_msg)
   {
-    if (!is_initialized_) {
+    if (!is_initialized_)
+    {
       return;
     }
 
-    if (!sh_octomap_.hasMsg()) {
+    if (!sh_octomap_.hasMsg())
+    {
       return;
     }
 
-    ROS_WARN_THROTTLE(1.0, "[PairsMinimalOctomapPlanner]: octomap timeout!");
+    RCLCPP_WARN_THROTTLE(node_->get_logger(), *clock_, 1000, "octomap timeout!");
   }
 
-  bool MinimalOctomapPlanner::callbackGetPath(pairs_octomap_planner::Path::Request&  req,
-                                              pairs_octomap_planner::Path::Response& res)
+  void MinimalOctomapPlanner::callbackGetPath(const std::shared_ptr<pairs_modules_msgs::srv::Path::Request> req,
+                                              std::shared_ptr<pairs_modules_msgs::srv::Path::Response> res)
   {
-    if (!is_initialized_) {
-      return false;
+    if (!is_initialized_)
+    {
+      res->success = false;
+      res->message = "node not initialized";
+      return;
     }
 
-    const bool got_octomap = sh_octomap_.hasMsg() && (ros::Time::now() - sh_octomap_.lastMsgTime()).toSec() < 2.0;
+    const bool got_octomap = sh_octomap_.hasMsg() && (clock_->now() - sh_octomap_.lastMsgTime()).seconds() < 2.0;
 
-    if (!got_octomap) {
-      ROS_INFO_THROTTLE(1.0,
-                        "[PairsMinimalOctomapPlanner]: waiting for data: octomap = %s",
-                        got_octomap ? "TRUE" : "FALSE");
-      return false;
+    if (!got_octomap)
+    {
+      RCLCPP_INFO_THROTTLE(node_->get_logger(), *clock_, 1000, "waiting for datoctomap = %s", got_octomap ? "TRUE" : "FALSE");
+      res->success = false;
+      return;
     }
 
     bv_planner_->setParentFrame(pairs_lib::get_mutexed(mutex_octree_, octree_frame_));
-    pairs_octomap_planner::AstarPlanner planner = pairs_octomap_planner::AstarPlanner(_safe_obstacle_distance_,
-                                                                                  _safe_obstacle_distance_,
-                                                                                  _distance_transform_distance_,
-                                                                                  _planning_tree_resolution_,
-                                                                                  _distance_penalty_,
-                                                                                  _greedy_penalty_,
-                                                                                  _timeout_threshold_,
-                                                                                  _max_waypoint_distance_,
-                                                                                  _min_altitude_,
-                                                                                  _max_altitude_,
-                                                                                  _unknown_is_occupied_,
-                                                                                  bv_planner_);
+    pairs_octomap_planner::AstarPlanner planner = pairs_octomap_planner::AstarPlanner(
+        node_, "PairsMinimalOctomapPlanner", _safe_obstacle_distance_, _safe_obstacle_distance_, _distance_transform_distance_, _planning_tree_resolution_,
+        _distance_penalty_, _greedy_penalty_, _timeout_threshold_, _max_waypoint_distance_, _min_altitude_, _max_altitude_, _unknown_is_occupied_, bv_planner_);
 
     octomap::point3d plan_from, plan_to;
-    plan_from.x() = req.start.x;
-    plan_from.y() = req.start.y;
-    plan_from.z() = req.start.z;
+    plan_from.x() = req->start.x;
+    plan_from.y() = req->start.y;
+    plan_from.z() = req->start.z;
 
-    plan_to.x() = req.end.x;
-    plan_to.y() = req.end.y;
-    plan_to.z() = req.end.z;
+    plan_to.x() = req->end.x;
+    plan_to.y() = req->end.y;
+    plan_to.z() = req->end.z;
 
     OcTreeSharedPtr_t octree = pairs_lib::get_mutexed(mutex_octree_, octree_);
 
     auto path = planner.findPath(plan_from, plan_to, octree, _timeout_threshold_);
 
     // check path
-    if (path.second) {
+    if (path.second)
+    {
       // path until the end
       path.first.push_back(plan_to);
       std::stringstream ss;
       ss << "Found complete path of length = " << path.first.size();
-      ROS_INFO_STREAM("[PairsMinimalOctomapPlanner]: " << ss.str());
-      res.message = ss.str();
-    }
-    else {
+      RCLCPP_INFO_STREAM(node_->get_logger(), "" << ss.str());
+      res->message = ss.str();
+    } else
+    {
       // no path at all
-      if (path.first.size() < 2) {
-        ROS_WARN("[PairsMinimalOctomapPlanner]: No path found");
-        res.success = false;
-        res.message = "No path found";
-        res.path    = std::vector<geometry_msgs::Point>();
-        return true;
+      if (path.first.size() < 2)
+      {
+        RCLCPP_WARN(node_->get_logger(), "No path found");
+        res->success = false;
+        res->message = "No path found";
+        res->path = std::vector<geometry_msgs::msg::Point>();
+        return;
       }
-      
+
       // path not until the end but to a closer point
       std::stringstream ss;
       ss << "Incomplete path found of length = " << path.first.size();
-      ROS_INFO_STREAM("[PairsMinimalOctomapPlanner]: " << ss.str());
-      res.message = ss.str();
+      RCLCPP_INFO_STREAM(node_->get_logger(), "" << ss.str());
+      res->message = ss.str();
 
       double front_x = path.first.front().x();
       double front_y = path.first.front().y();
@@ -257,60 +260,63 @@ namespace pairs_octomap_planner
       double back_y = path.first.back().y();
       double back_z = path.first.back().z();
 
-      double dist_path_start_to_end =
-          sqrt(pow(front_x - back_x, 2) + pow(front_y - back_y, 2) + pow(front_z - back_z, 2));
+      double dist_path_start_to_end = sqrt(pow(front_x - back_x, 2) + pow(front_y - back_y, 2) + pow(front_z - back_z, 2));
 
-      if (dist_path_start_to_end < _min_path_length_) {
+      if (dist_path_start_to_end < _min_path_length_)
+      {
         std::stringstream ss;
         ss << "Path too short, length: " << dist_path_start_to_end;
-        ROS_WARN_STREAM("[PairsMinimalOctomapPlanner]: " << ss.str());
-        res.message = ss.str();
+        RCLCPP_WARN_STREAM(node_->get_logger(), "" << ss.str());
+        res->message = ss.str();
       }
     }
 
-    std::vector<geometry_msgs::Point> tf_path;
-    auto                              from_frame = pairs_lib::get_mutexed(mutex_octree_, octree_frame_);
-    auto                              to_frame   = req.header.frame_id;
-    auto                              ret        = transformer_->getTransform(from_frame, to_frame, ros::Time::now());
+    std::vector<geometry_msgs::msg::Point> tf_path;
+    auto from_frame = pairs_lib::get_mutexed(mutex_octree_, octree_frame_);
+    auto to_frame = req->header.frame_id;
+    auto ret = transformer_->getTransform(from_frame, to_frame, clock_->now());
 
-    if (!ret) {
-      ROS_ERROR_STREAM_THROTTLE(1.0,
-                                "[PairsMinimalOctomapPlanner]: Failed to transform path from " << from_frame << " to "
-                                                                                             << to_frame);
-      return false;
+    if (!ret)
+    {
+      RCLCPP_ERROR(node_->get_logger(), "Failed to transform path from %s to %s", from_frame.c_str(), to_frame.c_str());
+      res->success = false;
+      res->message = "transform unavailable";
+      return;
     }
 
     auto tf = ret.value();
 
-    for (auto& point : path.first) {
+    for (auto& point : path.first)
+    {
 
-      geometry_msgs::PointStamped tmp_pt;
-      tmp_pt.header.stamp    = ros::Time::now();
+      geometry_msgs::msg::PointStamped tmp_pt;
+      tmp_pt.header.stamp = clock_->now();
       tmp_pt.header.frame_id = from_frame;
-      tmp_pt.point.x         = point.x();
-      tmp_pt.point.y         = point.y();
-      tmp_pt.point.z         = point.z();
+      tmp_pt.point.x = point.x();
+      tmp_pt.point.y = point.y();
+      tmp_pt.point.z = point.z();
 
       auto transformed_point = transformer_->transform(tmp_pt, tf);
 
-      if (!transformed_point) {
-        ROS_ERROR_STREAM_THROTTLE(1.0,
-                                  "[PairsMinimalOctomapPlanner]: Failed to transform path point from "
-                                      << from_frame << " to " << to_frame << " even when TF exists");
-        return false;
+      if (!transformed_point)
+      {
+        RCLCPP_ERROR(node_->get_logger(), "Failed to transform path point from %s to %s even when TF exists", from_frame.c_str(), to_frame.c_str());
+        res->success = false;
+        res->message = "point transform failed";
+        return;
       }
 
       tf_path.push_back(transformed_point->point);
     }
 
-    res.success         = true;
-    res.header.stamp    = ros::Time::now();
-    res.header.frame_id = to_frame;
-    res.path            = tf_path;
-    return true;
+    res->success = true;
+    res->header.stamp = clock_->now();
+    res->header.frame_id = to_frame;
+    res->path = tf_path;
+    return;
   }
-}
 
-#include <pluginlib/class_list_macros.h>
-PLUGINLIB_EXPORT_CLASS(pairs_octomap_planner::MinimalOctomapPlanner,
-                       nodelet::Nodelet)
+} // namespace pairs_octomap_planner
+
+#include <rclcpp_components/register_node_macro.hpp>
+RCLCPP_COMPONENTS_REGISTER_NODE(pairs_octomap_planner::MinimalOctomapPlanner)
