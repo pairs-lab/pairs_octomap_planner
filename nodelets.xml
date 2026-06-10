@@ -1,0 +1,11 @@
+<library path="lib/libPairsOctomapPlanner_OctomapPlanner">
+  <class name="pairs_octomap_planner/OctomapPlanner" type="pairs_octomap_planner::OctomapPlanner" base_class_type="nodelet::Nodelet">
+    <description>PAIRS Octomap Planner nodelet</description>
+  </class>
+</library>
+
+<library path="lib/libPairsOctomapPlanner_MinimalOctomapPlanner">
+  <class name="pairs_octomap_planner/MinimalOctomapPlanner" type="pairs_octomap_planner::MinimalOctomapPlanner" base_class_type="nodelet::Nodelet">
+    <description>PAIRS Minimal Octomap Planner nodelet</description>
+  </class>
+</library>
